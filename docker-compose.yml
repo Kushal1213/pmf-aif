@@ -1,0 +1,23 @@
+# docker compose up -d db api
+# docker compose run --rm loader            # full history load (resumable; re-run to retry failures)
+# docker compose run --rm loader python -m app.ingest metrics
+x-env: &env
+  DATABASE_URL: postgresql+psycopg://mf:mf@db/mf
+services:
+  db:
+    image: postgres:16
+    environment: {POSTGRES_USER: mf, POSTGRES_PASSWORD: mf, POSTGRES_DB: mf}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U mf"], interval: 5s, retries: 10}
+  api:
+    build: .
+    environment: {<<: *env, RATE_LIMIT_PER_MIN: "300"}
+    ports: ["8000:8000"]
+    depends_on: {db: {condition: service_healthy}}
+  loader:
+    build: .
+    profiles: [tools]
+    environment: *env
+    command: python -m app.ingest load
+    depends_on: {db: {condition: service_healthy}}
+volumes: {pgdata: {}}
