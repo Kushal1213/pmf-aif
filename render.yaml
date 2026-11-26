@@ -1,0 +1,23 @@
+# Render Blueprint: Dashboard -> New -> Blueprint -> pick this repo. Free web service (512 MB, 0.1 CPU,
+# sleeps after 15 min idle). The container restores the database snapshot from the private Hugging Face
+# dataset on boot; GitHub Actions (.github/workflows/refresh-data.yml) refreshes that snapshot daily.
+services:
+  - type: web
+    name: mf-analytics
+    runtime: docker
+    plan: free
+    region: singapore              # closest Render region to Indian users
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: SNAPSHOT_REPO
+        value: kushal11111/mf-analytics-data
+      - key: SNAPSHOT_CHECK_HOURS  # restart onto a newer snapshot if the service stays awake that long
+        value: "3"
+      - key: TRUST_FORWARDED_FOR   # behind Render's proxy: rate-limit by the real client IP
+        value: "true"
+      - key: RATE_LIMIT_PER_MIN
+        value: "300"
+      - key: HF_TOKEN              # read access to the private dataset; Render asks for it on first apply
+        sync: false

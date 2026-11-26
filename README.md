@@ -129,17 +129,17 @@ The image is self-contained: API + UI on one port, running as a non-root user wi
 
 A full first load is about 38,000 schemes and tens of millions of NAV rows; at the default `--rps 5` expect 2–3 hours. Run it once before opening the service to users. After that, `python -m app.ingest refresh --with-metrics` keeps the data current cheaply: new schemes get their full history, active schemes fetch only NAVs since their last date (minus a 7-day overlap for corrections), and closed schemes are skipped. Schemes whose source rows are all invalid (some dead funds are published with NAV 0) are stored without history instead of being retried forever.
 
-### Free hosting: Koyeb + GitHub Actions + a private Hugging Face dataset
+### Free hosting: Render + GitHub Actions + a private Hugging Face dataset
 
-Everything runs on free tiers:
+Everything runs on free tiers. Koyeb's free instance and Hugging Face Docker Spaces now need paid plans for new accounts, so Render hosts the app.
 
 | Piece | Free tier | Role |
 |---|---|---|
-| Koyeb free instance | 512 MB RAM, 0.1 vCPU, 2 GB disk, sleeps after 1 h idle | Runs the Docker image (API + UI) |
+| Render free web service | 512 MB RAM, 0.1 CPU, ephemeral disk, sleeps after 15 min idle (~1 min wake) | Runs the Docker image (API + UI) |
 | Hugging Face dataset (private) | free storage | Holds the database snapshot `mf.db.gz` |
 | GitHub Actions (public repo) | free minutes | Daily refresh from MFapi.in, then publishes a new snapshot |
 
-**What is hosted.** The full history (about 38,000 schemes, roughly 55 million NAV rows, about 1.8 GB) does not fit a 2 GB free instance. `python -m app.ingest export --years 5` builds the hosted database:
+**What is hosted.** The full history (about 38,000 schemes, roughly 55 million NAV rows, about 1.8 GB) is too large to restore quickly on a 0.1-CPU free instance with an ephemeral disk. `python -m app.ingest export --years 5` builds the hosted database:
 - **All schemes:** every scheme's metadata (name, house, category, ISIN, inception date) and cached metrics.
 - **Active schemes:** NAV rows for schemes with a NAV in the last 30 days, from 5 years (+15 days) before the latest NAV. That covers every 1W–5Y return, 1Y/3Y/5Y risk, rolling returns and SIP up to 5 years.
 - **Trimmed history:** where history is trimmed, responses carry `history_from` and `since_inception` is `null` rather than guessed.
@@ -151,17 +151,14 @@ Everything runs on free tiers:
 3. Trims with `export`.
 4. Uploads a new snapshot, squashing dataset history so storage stays flat.
 
-The Koyeb container runs `app.serve`, which restores the snapshot on boot and polls the dataset revision (`SNAPSHOT_CHECK_HOURS`). When a newer snapshot appears, it exits so Koyeb restarts it onto the new data. A sleeping instance also loads the newest snapshot when it wakes.
+The Render container runs `app.serve`, which restores the snapshot on boot and polls the dataset revision (`SNAPSHOT_CHECK_HOURS`). When a newer snapshot appears, it exits so Render restarts it onto the new data. A sleeping instance also loads the newest snapshot when it wakes.
 
 **Setup**
 1. Hugging Face: create the private dataset (`kushal11111/mf-analytics-data`), then a fine-grained token with read/write access to that dataset only.
 2. GitHub (repo Settings → Secrets and variables → Actions): add the secret `HF_TOKEN` and the variable `SNAPSHOT_REPO=kushal11111/mf-analytics-data`. Run the workflow once with **Run workflow**.
-3. Koyeb: create a Web Service from this GitHub repo, with these settings:
-   - **Builder:** Dockerfile. **Instance:** Free. **Region:** Frankfurt or Washington. **Port:** 8000 (HTTP).
-   - **Environment:** `SNAPSHOT_REPO=kushal11111/mf-analytics-data`, `SNAPSHOT_CHECK_HOURS=3`, `TRUST_FORWARDED_FOR=true`, `RATE_LIMIT_PER_MIN=300`, plus a Koyeb secret `HF_TOKEN`. A read-only token is enough here.
-   - **Health check:** HTTP `/health` with a 300 s grace period, so the first boot can restore the snapshot.
+3. Render: sign in with GitHub, then **New → Blueprint** and pick this repo. `render.yaml` defines the free web service (Docker, Singapore, health check `/health`, environment). Enter `HF_TOKEN` when asked; a read-only token is enough.
 
-After the instance has been asleep, the first visit takes about 1–3 minutes while the snapshot downloads and decompresses on 0.1 vCPU.
+After the service has been asleep, the first visit takes about 1–3 minutes: Render wakes it, then the snapshot downloads and decompresses on 0.1 CPU.
 
 ## Tests and offline demo
 

@@ -1,6 +1,6 @@
 # Daily data refresh for the hosted app (free: GitHub Actions on a public repo + a private Hugging Face dataset).
 # Restores the hosted snapshot, pulls new NAVs from mfapi.in, recomputes metrics, trims to the hosted size
-# and publishes a new snapshot; the Koyeb service notices the new revision and restarts onto it.
+# and publishes a new snapshot; the Render service notices the new revision and restarts onto it.
 #
 # Setup (repo Settings -> Secrets and variables -> Actions):
 #   secret   HF_TOKEN       fine-grained Hugging Face token with write access to the dataset below
