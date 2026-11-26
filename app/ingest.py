@@ -5,7 +5,7 @@ support (429 also pauses *all* workers), garbled-JSON retry, row-level validatio
 removal, idempotent upserts, resumable runs (skips schemes loaded recently; failures are retried
 on the next run).
 
-    python -m app.ingest load [--limit N] [--concurrency 8] [--rps 5]
+    python -m app.ingest load [--limit N] [--concurrency 8] [--rps 5] [--strict] [--with-metrics]
     python -m app.ingest metrics
     python -m app.ingest demo           # synthetic data, for offline use
 """
@@ -15,7 +15,9 @@ import argparse
 import asyncio
 import logging
 import math
+import os
 import random
+import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -25,12 +27,12 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import func, select
 
-from .db import METRIC_COLUMNS, get_engine, load_series, metadata, scheme_metrics, schemes, navs, upsert
+from .db import (ACTIVE_WINDOW_DAYS, METRIC_COLUMNS, get_engine, load_series, metadata, scheme_metrics,
+                 schemes, navs, upsert)
 from .metrics import DEFAULT_RF, summary_metrics
 
 log = logging.getLogger("ingest")
-BASE_URL = "https://api.mfapi.in"
-ACTIVE_WINDOW_DAYS = 10
+BASE_URL = os.getenv("MFAPI_BASE_URL", "https://api.mfapi.in")
 
 
 # ---------------------------------------------------------------- cleaning
@@ -224,6 +226,7 @@ async def load_all(engine, limit=None, concurrency=8, rps=5.0, max_age_hours=20,
 
 
 def compute_metrics(engine, rf: float = DEFAULT_RF, batch: int = 500) -> int:
+    """Refresh scheme_metrics for active schemes. A scheme that fails is logged and skipped."""
     metadata.create_all(engine)
     with engine.connect() as conn:
         ref = conn.scalar(select(func.max(schemes.c.last_nav_date)))
@@ -232,16 +235,32 @@ def compute_metrics(engine, rf: float = DEFAULT_RF, batch: int = 500) -> int:
         active = select(schemes.c.scheme_code).where(
             schemes.c.last_nav_date >= ref - timedelta(days=ACTIVE_WINDOW_DAYS), schemes.c.nav_count > 1)
         codes = [r[0] for r in conn.execute(active)]
-        buf, n = [], 0
         with engine.begin() as w:       # drop metrics of schemes that are no longer active
             w.execute(scheme_metrics.delete().where(scheme_metrics.c.scheme_code.not_in(active)))
-        for code in codes:
-            s = load_series(conn, code)
-            buf.append({"scheme_code": code, "as_of": s.index[-1].date(), **summary_metrics(s, rf)})
-            if len(buf) >= batch or code == codes[-1]:
+        buf, n, failed = [], 0, 0
+
+        def flush():
+            nonlocal buf, n
+            if buf:
                 with engine.begin() as w:
                     upsert(w, scheme_metrics, buf, ["scheme_code"], ["as_of", *METRIC_COLUMNS])
-                n += len(buf); buf = []
+                n += len(buf)
+                buf = []
+
+        for code in codes:
+            try:
+                s = load_series(conn, code)
+                if s.empty:
+                    continue
+                buf.append({"scheme_code": code, "as_of": s.index[-1].date(), **summary_metrics(s, rf)})
+            except Exception as e:  # noqa: BLE001 - one odd series must not stop the batch
+                failed += 1
+                log.warning("metrics for scheme %s failed: %s", code, e)
+            if len(buf) >= batch:
+                flush()
+        flush()
+    if failed:
+        log.warning("metrics failed for %d schemes", failed)
     return n
 
 
@@ -262,24 +281,45 @@ def seed_demo(engine, n: int = 30, years: int = 11, seed: int = 7):
                      {"fund_house": f"House {i % 4}", "scheme_type": "Open Ended Schemes", "scheme_category": cat}, rows, 0)
 
 
-def main():
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="app.ingest")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    l = sub.add_parser("load"); l.add_argument("--limit", type=int); l.add_argument("--concurrency", type=int, default=8)
-    l.add_argument("--rps", type=float, default=5.0); l.add_argument("--max-age-hours", type=float, default=20)
-    m = sub.add_parser("metrics"); m.add_argument("--rf", type=float, default=DEFAULT_RF)
-    d = sub.add_parser("demo"); d.add_argument("--n", type=int, default=30)
-    a = ap.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    l = sub.add_parser("load", help="fetch scheme list + NAV history (resumable)")
+    l.add_argument("--limit", type=int, help="max schemes to fetch this run (smoke tests)")
+    l.add_argument("--concurrency", type=int, default=8)
+    l.add_argument("--rps", type=float, default=5.0, help="global requests per second")
+    l.add_argument("--max-age-hours", type=float, default=20, help="skip schemes loaded more recently than this")
+    l.add_argument("--strict", action="store_true", help="exit with status 1 if any scheme failed")
+    l.add_argument("--with-metrics", action="store_true", help="refresh scheme_metrics after loading")
+    m = sub.add_parser("metrics", help="recompute screening metrics")
+    m.add_argument("--rf", type=float, default=DEFAULT_RF)
+    d = sub.add_parser("demo", help="seed synthetic data for offline use")
+    d.add_argument("--n", type=int, default=30)
+    a = ap.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)      # one line per request is too noisy at 40k schemes
     eng = get_engine()
     if a.cmd == "load":
-        st = asyncio.run(load_all(eng, a.limit, a.concurrency, a.rps, a.max_age_hours))
-        log.info("done: ok=%d skipped=%d failed=%d rows=%d rejected=%d", st["ok"], st["skipped"], len(st["failed"]), st["rows"], st["rejected"])
-    elif a.cmd == "metrics":
+        try:
+            st = asyncio.run(load_all(eng, a.limit, a.concurrency, a.rps, a.max_age_hours))
+        except (ValueError, SourceError) as e:
+            log.error("load aborted: %s", e)
+            return 1
+        log.info("done: ok=%d skipped=%d failed=%d rows=%d rejected=%d", st["ok"], st["skipped"],
+                 len(st["failed"]), st["rows"], st["rejected"])
+        if st["failed"]:
+            shown = ", ".join(map(str, sorted(st["failed"])[:20]))
+            log.warning("failed schemes (re-run to retry): %s%s", shown, " ..." if len(st["failed"]) > 20 else "")
+        if a.with_metrics:
+            log.info("metrics for %d schemes", compute_metrics(eng))
+        return 1 if a.strict and st["failed"] else 0
+    if a.cmd == "metrics":
         log.info("metrics for %d schemes", compute_metrics(eng, a.rf))
-    else:
-        seed_demo(eng, a.n); log.info("demo seeded; now run: python -m app.ingest metrics")
+        return 0
+    seed_demo(eng, a.n)
+    log.info("demo seeded; now run: python -m app.ingest metrics")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

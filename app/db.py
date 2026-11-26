@@ -9,6 +9,28 @@ from .metrics import make_series
 
 METRIC_COLUMNS = ["ret_1m", "ret_3m", "ret_6m", "ret_1y", "ret_3y", "ret_5y",
                   "vol_1y", "vol_3y", "mdd_1y", "mdd_3y", "sharpe_1y", "sharpe_3y"]
+# A scheme is "active" if it has a NAV within this many days of the newest NAV in the database.
+ACTIVE_WINDOW_DAYS = 10
+IDCW_WORDS = ("idcw", "dividend")
+
+
+def classify_plan(name: str | None) -> dict[str, str | None]:
+    """Best-effort plan/option from the scheme name (AMFI names usually say 'Direct Plan - Growth').
+
+    plan: 'direct' if the name says Direct, else 'regular' (pre-2013 schemes predate Direct plans).
+    option: 'idcw' (incl. legacy 'Dividend'), 'growth', 'bonus' or None when the name is silent.
+    The same rules are used for SQL filtering in the API, so filters and labels always agree.
+    """
+    n = (name or "").lower()
+    if any(w in n for w in IDCW_WORDS):
+        option = "idcw"
+    elif "growth" in n:
+        option = "growth"
+    elif "bonus" in n:
+        option = "bonus"
+    else:
+        option = None
+    return {"plan": "direct" if "direct" in n else "regular", "option": option}
 
 metadata = MetaData()
 

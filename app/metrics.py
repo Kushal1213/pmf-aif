@@ -203,3 +203,98 @@ def category_index(series: list[pd.Series], min_constituents: int = 3) -> pd.Ser
     idx = 100 * (1 + avg).cumprod()
     base = pd.Series([100.0], index=pd.DatetimeIndex([avg.index[0] - pd.Timedelta(days=1)]))
     return pd.concat([base, idx])
+
+
+# ---------------------------------------------------------------- SIP / XIRR
+def xirr(cashflows: list[tuple[pd.Timestamp, float]]) -> float | None:
+    """Annualised internal rate of return (as a fraction) for dated cash flows, or None.
+
+    Uses Newton's method with a bisection fallback. Needs at least one negative and one positive flow.
+    """
+    if len(cashflows) < 2 or not any(v < 0 for _, v in cashflows) or not any(v > 0 for _, v in cashflows):
+        return None
+    t0 = min(d for d, _ in cashflows)
+    yrs = np.array([(d - t0).days / 365.0 for d, _ in cashflows])
+    amt = np.array([v for _, v in cashflows], dtype=float)
+
+    def npv(r):
+        return float(np.sum(amt / (1 + r) ** yrs))
+
+    r = 0.1
+    for _ in range(50):
+        if r <= -0.999999:
+            break
+        f = npv(r)
+        df = float(np.sum(-yrs * amt / (1 + r) ** (yrs + 1)))
+        if not math.isfinite(f) or not math.isfinite(df) or df == 0:
+            break
+        nr = r - f / df
+        if abs(nr - r) < 1e-10:
+            return nr if nr > -1 else None
+        r = nr
+    lo, hi = -0.9999, 10.0                      # bisection fallback over a wide bracket
+    flo, fhi = npv(lo), npv(hi)
+    if not (math.isfinite(flo) and math.isfinite(fhi)) or flo * fhi > 0:
+        return None
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        fm = npv(mid)
+        if abs(fm) < 1e-9 or hi - lo < 1e-12:
+            return mid
+        if flo * fm < 0:
+            hi = mid
+        else:
+            lo, flo = mid, fm
+    return (lo + hi) / 2
+
+
+def _first_on_or_after(s: pd.Series, ts: pd.Timestamp, max_gap: int = MAX_GAP_DAYS):
+    i = s.index.searchsorted(ts, side="left")
+    if i >= len(s) or (s.index[i] - ts).days > max_gap:
+        return None
+    return s.index[i], float(s.iloc[i])
+
+
+def sip_returns(s: pd.Series, amount: float, start, end=None, day: int = 1) -> dict[str, Any]:
+    """Monthly SIP simulation on published NAVs (no stamp duty, exit load or taxes).
+
+    Each instalment buys at the first NAV on or after its scheduled date (within MAX_GAP_DAYS);
+    instalments with no NAV in that window are skipped and counted. The holding is valued at the
+    last NAV on or before `end` (default: latest NAV).
+    """
+    if s.empty:
+        return {"available": False, "reason": "no NAV data"}
+    end_ts = pd.Timestamp(end) if end is not None else s.index[-1]
+    val = _asof(s, end_ts)
+    if val is None:
+        return {"available": False, "reason": "no NAV within 7 days on or before end date"}
+    start_ts = pd.Timestamp(start)
+    first = pd.Timestamp(start_ts.year, start_ts.month, 1)
+    flows, units, skipped, schedule = [], 0.0, 0, []
+    m = first
+    while m <= val[0]:
+        due = m + pd.Timedelta(days=min(day, m.days_in_month) - 1)
+        if start_ts <= due <= val[0]:
+            schedule.append(due)
+        m = m + pd.DateOffset(months=1)
+    for due in schedule:
+        hit = _first_on_or_after(s, due)
+        if hit is None or hit[0] > val[0]:
+            skipped += 1
+            continue
+        units += amount / hit[1]
+        flows.append((hit[0], -float(amount)))
+    if not flows:
+        return {"available": False, "reason": "no instalment could be invested in the requested range"}
+    invested = amount * len(flows)
+    value = units * val[1]
+    irr = xirr(flows + [(val[0], value)])
+    return {
+        "available": True, "monthly_amount": amount, "day_of_month": day,
+        "first_instalment": flows[0][0].date().isoformat(), "valuation_date": val[0].date().isoformat(),
+        "instalments": len(flows), "skipped_instalments": skipped,
+        "total_invested": _r(invested, 2), "units": _r(units, 4), "valuation_nav": _r(val[1], 4),
+        "current_value": _r(value, 2), "gain": _r(value - invested, 2),
+        "absolute_return_pct": _r((value / invested - 1) * 100),
+        "xirr_pct": _r(irr * 100) if irr is not None else None,
+    }

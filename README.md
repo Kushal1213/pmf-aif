@@ -1,6 +1,6 @@
 # Indian Mutual Fund Analytics API
 
-FastAPI service and resumable loader for Indian mutual-fund scheme metadata and daily NAV history. It stores each scheme's complete history returned by the configured source, then exposes point returns, rolling returns and risk metrics. PostgreSQL is the recommended database for a full import; SQLite is useful for local development and small samples.
+FastAPI service, web UI and resumable loader for Indian mutual-fund scheme metadata and daily NAV history. It stores each scheme's complete history returned by the configured source, then exposes point returns, rolling returns and risk metrics. PostgreSQL is the recommended database for a full import; SQLite is useful for local development and small samples.
 
 ## Data source and coverage
 
@@ -16,23 +16,54 @@ The importer fetches the source's scheme list and each returned scheme history. 
 python -m venv .venv
 # Windows: .venv\Scripts\Activate.ps1
 # macOS/Linux: source .venv/bin/activate
-pip install -r requirements.txt
-python -m app.ingest load --limit 25       # small live sample
-python -m app.ingest metrics
+pip install -r requirements-dev.txt        # runtime deps + pytest
+python -m app.ingest load --limit 25 --with-metrics   # small live sample
 uvicorn app.main:app --reload
 ```
 
-Open `http://127.0.0.1:8000/docs` for interactive API documentation. The default database is `sqlite:///mf.db`.
+Open `http://127.0.0.1:8000/` for the web UI and `http://127.0.0.1:8000/docs` for interactive API documentation. The default database is `sqlite:///mf.db`.
+
+## Web UI
+
+The API process also serves a small single-page UI from `app/static/` (plain HTML/CSS/JS, no build step). It is same-origin with the API, so it needs no CORS setup and ships inside the same container.
+
+- **Header search**: press `/` anywhere, type a name, pick with the arrow keys and Enter.
+- **Theme**: dark by default, with a light theme from the header button (remembered per browser).
+
+- **Screener**: filter by name, category, plan, option, status and metric thresholds; sort by any column; tick schemes to compare.
+- **Scheme page**: KPIs, NAV chart (1Y–max), point returns, risk by period with an adjustable risk-free rate, rolling-return chart and summary, SIP calculator with XIRR, and data-quality details.
+- **Compare**: up to 10 schemes, growth-of-₹100 chart from a common start, side-by-side returns/risk with the best value in bold, category/IDCW warnings and a shareable link.
+- **Categories**: category averages, then an index chart, rolling returns and the spread across schemes.
+
+The compare basket is kept in the browser's local storage. `/`, `/static/*` and `/favicon.ico` are exempt from the API rate limit; static files are served with `Cache-Control: no-cache` plus an ETag, so a new deployment is picked up on the next page load.
+
+### Design system
+
+- **Direction** (from the UI/UX Pro Max design-system search for a fintech analytics dashboard): dark slate/navy base, green for gains and the primary action, red for losses, Fira Sans for text and Fira Code for figures, dense spacing, 6–8px corners. Text contrast is at least 4.5:1 in both themes, and touch targets are 44px on phones.
+- **Motion** (taste-skill rules): the page heading and KPI row enter once per view, buttons step up on hover and press on click, links draw their underline, and charts draw in on first render. Nothing animates on scroll, and everything rests under `prefers-reduced-motion`. No violet is used anywhere.
+- **Components ported from React Bits to plain JS**: CountUp (KPI values count up to their final figure, which screen readers get directly), SpotlightCard (pointer light and border glow on KPI tiles) and a sliding segmented control.
+- **Lottie**: `app/static/vendor/lottie_light.min.js` is lottie-web 5.13.0's SVG-only light build. It has no expressions engine, so no `eval`. MIT licence in `app/static/vendor/LICENSE-lottie-web.txt`. The two animations in `app/static/anim/` (the busy indicator and the empty-state chart) are small hand-written JSON files.
+- **Fonts** load from Google Fonts with `display=swap` and system fallbacks, which is the UI's only third-party request. To avoid it, self-host the two families and drop the `fonts.googleapis.com` links in `index.html`.
+- **Licences**: React Bits is MIT plus the Commons Clause. Using adapted components inside this product is fine, but the components themselves must not be resold.
 
 ### Full import with PostgreSQL
 
 ```bash
 docker compose up -d db api
-docker compose run --rm loader
-docker compose run --rm loader python -m app.ingest metrics
+docker compose run --rm loader            # loads history, then refreshes metrics
 ```
 
-The database persists in the `pgdata` volume. Import is resumable: schemes loaded in the last 20 hours are skipped, while failed schemes are eligible on the next run. Tune `--concurrency`, `--rps`, and `--max-age-hours` for the source and environment. `--limit` limits the number of schemes fetched in that run; it is intended for smoke runs, not complete ingestion.
+The database persists in the `pgdata` volume. Import is resumable: schemes loaded in the last 20 hours are skipped, while failed schemes are eligible on the next run. Tune `--concurrency`, `--rps`, and `--max-age-hours` for the source and environment. `--limit` limits the number of schemes fetched in that run; it is intended for smoke runs, not complete ingestion. `--with-metrics` refreshes screening metrics after the load, and `--strict` makes the command exit with status 1 if any scheme failed (useful in cron/CI). Failed scheme codes are logged at the end of each run.
+
+### Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | `sqlite:///mf.db` | SQLAlchemy URL, e.g. `postgresql+psycopg://user:pass@host/db` |
+| `RATE_LIMIT_PER_MIN` | `300` | Per-client API requests per minute; `0` disables |
+| `TRUST_FORWARDED_FOR` | off | Use `X-Forwarded-For` as the client IP. Enable only behind a proxy you control |
+| `CORS_ORIGINS` | empty | Comma-separated browser origins allowed to call the API (GET only) |
+| `MFAPI_BASE_URL` | `https://api.mfapi.in` | Source base URL (for a mirror or a local stub) |
 
 ## API
 
@@ -47,13 +78,17 @@ All list endpoints are paginated (`page`, default 1; `page_size`, default 50, ma
 | `GET /schemes/{code}/rolling-returns` | Rolling-return summary and paginated date series |
 | `GET /schemes/{code}/risk` | Volatility, maximum drawdown and Sharpe ratio |
 | `GET /schemes/{code}/analytics` | Point returns and risk/rolling summaries together |
+| `GET /schemes/{code}/sip` | Monthly SIP simulation: invested, current value, absolute return and XIRR |
+| `GET /compare?codes=a,b,...` | Side-by-side returns and 3y risk for 2–10 schemes on a common as-of date |
 | `GET /schemes/{code}/data-quality` | Coverage estimate, large date gaps and rejected input rows |
 | `GET /categories` | Category counts and equal-weighted averages of cached scheme metrics |
 | `GET /categories/analytics` | Metrics for an equal-weighted category NAV index and constituent dispersion |
 | `GET /categories/rolling-returns` | Category index rolling-return series |
-| `GET /health` | Basic API/database health response |
+| `GET /schemes/{code}/chart` | Downsampled NAV and rolling-return series for charts (`range`, `window`, `max_points`) |
+| `GET /categories/chart` | Downsampled category-index and rolling-return series for charts |
+| `GET /health` | Database reachability (503 when down), latest NAV date and metrics freshness |
 
-`/schemes` supports `q`, `category`, `fund_house`, `scheme_type`, `active`, `min_ret_1y`, `min_ret_3y`, `max_vol_3y`, `min_sharpe_3y`, `sort_by`, and `order`. Sort fields are allow-listed. Category names are case-insensitive exact matches except for `/categories?name=` substring search.
+`/schemes` supports `q`, `category`, `fund_house`, `scheme_type`, `plan` (`direct`/`regular`), `option` (`growth`/`idcw`/`bonus`), `active`, `min_ret_1y`, `min_ret_3y`, `max_vol_3y`, `min_sharpe_3y`, `sort_by`, and `order`. Sort fields are allow-listed. Category names are case-insensitive exact matches except for `/categories?name=` substring search. Scheme responses include `isin`, `plan`, `option` and `metrics_as_of`. Plan and option are derived from the scheme name ("Direct" → direct, otherwise regular; "IDCW"/"Dividend" → idcw, "Growth" → growth, "Bonus" → bonus), so treat them as best-effort labels. Date ranges where `from_date` is after `to_date` are rejected with 422, and `rf` is limited to 0–50 on every endpoint.
 
 ## Metric conventions
 
@@ -66,6 +101,9 @@ All list endpoints are paginated (`page`, default 1; `page_size`, default 50, ma
 - Category analytics build an equal-weighted, daily-rebalanced index from currently active schemes, using up to `max_schemes` (default 100, maximum 500), chosen by longest stored history. It is not AUM-weighted and has survivorship bias. `/categories` averages scheme metrics directly and should not be confused with index returns.
 - Published NAV is used as-is. IDCW plans therefore show NAV price returns and do not include distributions/reinvestment. For performance comparisons, use Growth plans and compare like-for-like plan types.
 
+- SIP simulation invests a fixed amount each month on `day` (1–28), at the first NAV on or after that date within seven days; months without such a NAV are skipped and counted. Holdings are valued at the last NAV on or before `end`. XIRR is the annualised money-weighted return on those dated cash flows. Stamp duty, exit loads and taxes are ignored.
+- `/compare` evaluates every scheme as of the same date (default: the earliest of their latest NAV dates) and warns when schemes are from different categories or mix growth and IDCW options.
+
 These are transparent implementation conventions, not a claim that there is one universally mandated return/risk calculation. Compare methodology when matching figures from another provider.
 
 ## Storage and ingestion notes
@@ -75,7 +113,21 @@ These are transparent implementation conventions, not a claim that there is one 
 - Ingestion validates positive finite NAV values, dates and response shapes; duplicate dates are counted as rejected and the last source value wins. Isolated extreme spikes are filtered only when adjacent values strongly agree. Rejected row counts are exposed in data-quality output.
 - The loader spaces requests globally within one process, retries network errors, malformed JSON, HTTP 429 and 5xx with exponential backoff and jitter, honours numeric and HTTP-date `Retry-After`, and isolates failures by scheme. `--rps` must be positive; `--concurrency` must be at least one.
 - NAV rows are not forward-filled. Gaps remain visible and affect metric availability. The coverage percentage is a weekday estimate and does not account for Indian market holidays.
-- API rate limiting is per process and per client IP (`RATE_LIMIT_PER_MIN`, default 300; set to `0` to disable). Multiple API workers need a shared gateway or Redis limiter. Forwarded IP headers should only be trusted behind a correctly configured proxy.
+- API rate limiting is per process and per client IP (`RATE_LIMIT_PER_MIN`, default 300; set to `0` to disable). Idle clients are forgotten after a minute so memory stays bounded. Multiple API workers need a shared gateway or Redis limiter. `X-Forwarded-For` is ignored unless `TRUST_FORWARDED_FOR` is set.
+- The metrics job skips and logs a scheme whose series cannot be computed instead of aborting the batch.
+- The Docker image runs as a non-root user and has a `/health` container health check.
+
+## Deployment
+
+The image is self-contained: API + UI on one port, running as a non-root user with a `/health` container health check.
+
+1. **Database.** Use PostgreSQL in production (`DATABASE_URL=postgresql+psycopg://...`). Tables are created on startup. SQLite works for a single small instance but not for several replicas.
+2. **Run the API.** `docker build -t mf-api .` then run with `DATABASE_URL` set. The container listens on `$PORT` (default 8000), so platforms that inject `PORT` (Render, Railway, Fly.io, Cloud Run) work as-is. Point the platform's health check at `/health`; it returns 503 when the database is unreachable.
+3. **Load data.** Run the same image as a one-off/scheduled job: `python -m app.ingest load --with-metrics --strict`. Schedule it daily after AMFI publishes NAVs (late evening IST). Re-runs are incremental and retry earlier failures.
+4. **Behind a proxy/load balancer.** Set `TRUST_FORWARDED_FOR=true` so rate limiting uses the real client IP. Leave it off when the app is directly exposed.
+5. **Scaling.** The in-process rate limiter and category cache are per process. With several replicas, enforce rate limits at the gateway (or set `RATE_LIMIT_PER_MIN=0` and rely on the gateway).
+
+A full first load is roughly 40k schemes and tens of millions of NAV rows; at the default `--rps 5` expect a few hours. Run it once before opening the service to users.
 
 ## Tests and offline demo
 
@@ -85,7 +137,7 @@ python -m app.ingest demo --n 30
 python -m app.ingest metrics
 ```
 
-Tests use generated series and `httpx.MockTransport`; they do not depend on the live data source. Demo data is synthetic and must not be used as real market data.
+Install dev dependencies with `pip install -r requirements-dev.txt`. Tests use generated series and `httpx.MockTransport`; they do not depend on the live data source. Demo data is synthetic and must not be used as real market data.
 
 ## Known limitations
 
