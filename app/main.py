@@ -240,8 +240,22 @@ def create_app(engine=None, rate_limit_per_min: int | None = None, trust_forward
         row = scheme_or_404(conn, code)
         s = load_series(conn, code)
         if s.empty:
-            raise HTTPException(404, f"Scheme {code} has no NAV history loaded")
+            msg = (f"Scheme {code} is inactive; its NAV history is not included in this dataset"
+                   if row["nav_count"] else f"Scheme {code} has no NAV history")
+            raise HTTPException(404, msg)
         return row, s
+
+    def history_from(row, s):
+        """First stored NAV date when the stored history starts after the scheme's inception (hosted dataset)."""
+        first = row["first_nav_date"]
+        start = s.index[0].date()
+        return start if first and (start - first).days > M.MAX_GAP_DAYS else None
+
+    def returns_for(row, s):
+        r = M.point_returns(s)
+        if history_from(row, s):
+            r["since_inception"] = None          # the inception NAV is not stored, never guess
+        return r
 
     def period_or_422(text):
         try:
@@ -325,19 +339,19 @@ def create_app(engine=None, rate_limit_per_min: int | None = None, trust_forward
              summary="Coverage, gaps and rejected rows for a scheme's NAV history")
     def data_quality(code: int, conn: Conn):
         row, s = series_or_404(conn, code)
-        return {"scheme_code": code, **M.data_quality(s, row["rejected_rows"] or 0)}
+        return {"scheme_code": code, "history_from": history_from(row, s), **M.data_quality(s, row["rejected_rows"] or 0)}
 
     # ------------------------------------------------------------ analytics
     @app.get("/schemes/{code}/returns", tags=["Analytics"],
              summary="Point-to-point returns: 1w, 1m, 3m, 6m, 1y, 3y, 5y, 10y, YTD, since inception")
     def returns(code: int, conn: Conn, as_of: Annotated[date | None, Query(description="Default: latest NAV")] = None):
-        _, s = series_or_404(conn, code)
+        row, s = series_or_404(conn, code)
         if as_of:
             s = s.loc[: pd.Timestamp(as_of)]
             if s.empty:
                 raise HTTPException(404, "No NAV on or before as_of")
         return {"scheme_code": code, "as_of": s.index[-1].date(), "unit": "percent",
-                "returns": M.point_returns(s)}
+                "history_from": history_from(row, s), "returns": returns_for(row, s)}
 
     @app.get("/schemes/{code}/rolling-returns", tags=["Analytics"],
              summary="Rolling returns: summary statistics + paginated series")
@@ -360,8 +374,9 @@ def create_app(engine=None, rate_limit_per_min: int | None = None, trust_forward
 
     @app.get("/schemes/{code}/analytics", tags=["Analytics"], summary="Everything in one call")
     def analytics(code: int, conn: Conn, rf: RF = M.DEFAULT_RF):
-        _, s = series_or_404(conn, code)
-        return {"scheme_code": code, "as_of": s.index[-1].date(), "returns": M.point_returns(s),
+        row, s = series_or_404(conn, code)
+        return {"scheme_code": code, "as_of": s.index[-1].date(), "history_from": history_from(row, s),
+                "returns": returns_for(row, s),
                 "risk": {p: M.risk_metrics(s, M.parse_period(p), rf) for p in ANALYTIC_PERIODS},
                 "rolling_returns_summary": {w: M.rolling_summary(M.rolling_returns(s, M.parse_period(w)))
                                             for w in ANALYTIC_PERIODS}}
@@ -418,7 +433,7 @@ def create_app(engine=None, rate_limit_per_min: int | None = None, trust_forward
                 "scheme_code": c, "name": rows[c]["name"], "category": rows[c]["category"],
                 **classify_plan(rows[c]["name"]),
                 "nav_date": s.index[-1].date() if not s.empty else None,
-                "returns": M.point_returns(s) if not s.empty else None,
+                "returns": returns_for(rows[c], s) if not s.empty else None,
                 "risk_3y": {k: r3.get(k) for k in ("available", "reason", "volatility_pct", "sharpe_ratio")}
                 | {"max_drawdown_pct": (r3.get("max_drawdown") or {}).get("max_drawdown_pct")},
             })
@@ -518,10 +533,11 @@ def create_app(engine=None, rate_limit_per_min: int | None = None, trust_forward
                 latest = conn.scalar(select(func.max(schemes.c.last_nav_date)))
                 m_n = conn.scalar(select(func.count()).select_from(scheme_metrics))
                 m_asof = conn.scalar(select(func.max(scheme_metrics.c.as_of)))
+                refreshed = conn.scalar(select(func.max(schemes.c.loaded_at)))
         except Exception as e:  # noqa: BLE001 - report, don't crash the probe
             log.warning("health check failed: %s", e)
             return JSONResponse({"status": "error", "detail": "database unavailable"}, 503)
-        return {"status": "ok", "version": VERSION, "schemes": n, "latest_nav_date": latest,
+        return {"status": "ok", "version": VERSION, "schemes": n, "latest_nav_date": latest, "last_refresh_utc": refreshed,
                 "metrics": {"schemes": m_n, "as_of": m_asof,
                             "stale": bool(latest and (m_asof is None or m_asof < latest))}}
 

@@ -326,6 +326,7 @@ async function schemeView(code, params, tok) {
     </div>
     ${s.is_active ? "" : `<div class="notice" role="note">${ICON.alert}<span>This scheme has no recent NAV. It may be closed or merged; metrics reflect its last available data.</span></div>`}
     ${s.option === "idcw" ? `<div class="notice" role="note">${ICON.alert}<span>IDCW plan: returns are NAV price returns and exclude payouts. Use the Growth option to compare performance.</span></div>` : ""}
+    ${a.history_from ? `<div class="notice" role="note">${ICON.alert}<span>NAV history here starts on ${dateFmt(a.history_from)} (scheme launched ${dateFmt(s.first_nav_date)}), so 10-year and since-inception figures aren't shown.</span></div>` : ""}
     <div class="kpis">
       ${kpi("NAV · " + dateFmt(a.as_of), `<span id="last-nav">—</span>`)}
       ${kpi("1Y return", pct(r["1y"]))}${kpi("3Y CAGR", pct(r["3y"]))}${kpi("5Y CAGR", pct(r["5y"]))}

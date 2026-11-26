@@ -4,4 +4,5 @@ sqlalchemy>=2.0
 httpx>=0.27
 pandas>=2.0
 numpy>=1.26
+huggingface_hub>=0.24   # database snapshots for free hosting (app/snapshot.py)
 # optional, for PostgreSQL:  psycopg[binary]>=3.1
