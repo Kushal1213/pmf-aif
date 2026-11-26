@@ -1,8 +1,8 @@
 """Portable database snapshots for free-tier hosting.
 
-The free Hugging Face Space has no persistent disk, so the SQLite database is kept as a gzip snapshot
-in a (free) Hugging Face dataset repo: the container restores it on boot, refreshes it from mfapi.in,
-and uploads a new snapshot afterwards. `VACUUM INTO` gives a consistent, compact copy while the API
+Free hosts (Render free tier) have no persistent disk, so the SQLite database is kept as a gzip snapshot
+in a private Hugging Face dataset repo: the container restores it on boot, a scheduled job refreshes it
+from mfapi.in and uploads a new snapshot. `VACUUM INTO` gives a consistent, compact copy while the API
 keeps serving reads from the live file.
 """
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Single-container entrypoint for free hosting (Koyeb free instance, Hugging Face, any Docker host).
+"""Single-container entrypoint for free hosting (Render free web service, or any Docker host).
 
 With a SQLite DATABASE_URL:
 1. If the database is missing and SNAPSHOT_REPO is set, restore the latest snapshot from that Hugging Face

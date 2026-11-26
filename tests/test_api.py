@@ -82,3 +82,9 @@ def test_api_rate_limit(tmp_path):
         r = c.get("/schemes")
         assert int(r.headers["Retry-After"]) >= 1
         assert c.get("/health").status_code == 200        # health check is exempt
+
+
+def test_search_matches_every_word(client):
+    assert client.get("/schemes", params={"q": "demo 3"}).json()["total"] == 1      # words in any position
+    assert client.get("/schemes", params={"q": "fund demo"}).json()["total"] == 9
+    assert client.get("/schemes", params={"q": "demo nothing"}).json()["total"] == 0

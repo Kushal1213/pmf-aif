@@ -280,7 +280,7 @@ def create_app(engine=None, rate_limit_per_min: int | None = None, trust_forward
              summary="List/filter/sort schemes (category screener)")
     def list_schemes(
         conn: Conn, pg: Pg,
-        q: Annotated[str | None, Query(description="Case-insensitive name search")] = None,
+        q: Annotated[str | None, Query(description="Case-insensitive name search; every word must match")] = None,
         category: Annotated[str | None, Query(description="Exact category (see /categories)")] = None,
         fund_house: str | None = None, scheme_type: str | None = None,
         plan: Annotated[Literal["direct", "regular"] | None, Query(description="Derived from scheme name")] = None,
@@ -295,7 +295,8 @@ def create_app(engine=None, rate_limit_per_min: int | None = None, trust_forward
             raise HTTPException(422, f"sort_by must be one of {sorted(SORTABLE)}")
         cutoff = cutoff_date(conn)
         conds = _plan_filter(plan, option)
-        if q: conds.append(schemes.c.name.icontains(q, autoescape=True))
+        for word in (q or "").split()[:8]:   # every word must appear: "parag flexi" finds "Parag Parikh Flexi Cap"
+            conds.append(schemes.c.name.icontains(word, autoescape=True))
         if category: conds.append(func.lower(schemes.c.category) == category.lower())
         if fund_house: conds.append(func.lower(schemes.c.fund_house) == fund_house.lower())
         if scheme_type: conds.append(func.lower(schemes.c.scheme_type) == scheme_type.lower())
@@ -457,7 +458,8 @@ def create_app(engine=None, rate_limit_per_min: int | None = None, trust_forward
             q = q.where(schemes.c.category.icontains(name, autoescape=True))
         page, size = pg
         total = conn.scalar(select(func.count()).select_from(q.subquery()))
-        rows = conn.execute(q.order_by(schemes.c.category).limit(size).offset((page - 1) * size)).mappings().all()
+        rows = conn.execute(q.order_by((func.coalesce(func.sum(case((schemes.c.last_nav_date >= cutoff, 1), else_=0)), 0) > 0).desc(),
+                                      schemes.c.category).limit(size).offset((page - 1) * size)).mappings().all()
         items = [{"category": r["category"], "scheme_count": r["scheme_count"], "active_count": int(r["active_count"] or 0),
                   "averages": {f"avg_{c}": M._r(r[c]) for c in AVG_COLS}} for r in rows]
         return _page(items, total, page, size)
